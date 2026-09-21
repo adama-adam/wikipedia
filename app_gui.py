@@ -1,232 +1,181 @@
+from __future__ import annotations
+
 import os
-import sys
 import threading
-from typing import List, Dict, Any
+import tkinter as tk
+from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
-import wikipediaapi
-from duckduckgo_search import DDGS
-from google import genai
-from google.genai import types
 
-# Konfiguracja motywu CustomTkinter
-ctk.set_appearance_mode("Dark")
-ctk.set_default_color_theme("blue")
+from research_core.config import Settings
+from research_core.exporter import export_markdown
+from research_core.history import HistoryStore
+from research_core.pipeline import ResearchPipeline
 
 
-class RAGApp(ctk.CTk):
+class ResearchApp(ctk.CTk):
     def __init__(self):
         super().__init__()
-
-        self.title("Wikipedia & Web RAG Research Agent")
-        self.geometry("1000rollback" if False else "1050x750")
-        self.minsize(800, 600)
-
+        self.title("Wikipedia Research AI 2.0")
+        self.geometry("1250x820")
+        self.minsize(950, 650)
+        self.result = None
+        self.history = HistoryStore()
         self._build_ui()
 
     def _build_ui(self):
-        # Nagłówek i Sekcja Konfiguracyjna
-        top_frame = ctk.CTkFrame(self, corner_radius=10)
-        top_frame.pack(fill="x", padx=15, pady=15)
+        ctk.set_appearance_mode("System")
+        ctk.set_default_color_theme("blue")
 
-        title_label = ctk.CTkLabel(
-            top_frame,
-            text=" Wikipedia & Web RAG Research Agent",
-            font=ctk.CTkFont(size=20, weight="bold"),
+        header = ctk.CTkFrame(self, corner_radius=12)
+        header.pack(fill="x", padx=16, pady=16)
+
+        ctk.CTkLabel(
+            header, text="Wikipedia Research AI",
+            font=ctk.CTkFont(size=26, weight="bold")
+        ).pack(anchor="w", padx=18, pady=(14, 2))
+        ctk.CTkLabel(
+            header,
+            text="Wikipedia + Web + Gemini • źródła • cytowania • wieloetapowy research",
+        ).pack(anchor="w", padx=18, pady=(0, 12))
+
+        row = ctk.CTkFrame(header, fg_color="transparent")
+        row.pack(fill="x", padx=14, pady=5)
+
+        self.query = ctk.CTkEntry(
+            row, placeholder_text="Co chcesz zbadać?", height=42,
+            font=ctk.CTkFont(size=14)
         )
-        title_label.pack(anchor="w", padx=15, pady=(10, 5))
+        self.query.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.query.bind("<Return>", lambda _: self.start())
 
-        # Klucz API
-        api_frame = ctk.CTkFrame(top_frame, fg_color="transparent")
-        api_frame.pack(fill="x", padx=15, pady=5)
+        self.lang = ctk.CTkOptionMenu(row, values=["pl", "en", "de", "fr", "es"], width=70)
+        self.lang.set("pl")
+        self.lang.pack(side="left", padx=5)
 
-        ctk.CTkLabel(api_frame, text="Klucz GEMINI_API_KEY:", font=ctk.CTkFont(size=12, weight="bold")).pack(side="left", padx=(0, 5))
-        
-        default_key = os.environ.get("GEMINI_API_KEY", "")
-        self.api_key_entry = ctk.CTkEntry(api_frame, placeholder_text="Wklej klucz GEMINI_API_KEY...", show="*", width=450)
-        self.api_key_entry.insert(0, default_key)
-        self.api_key_entry.pack(side="left", fill="x", expand=True, padx=5)
-
-        # Sekcja Wyszukiwania
-        search_frame = ctk.CTkFrame(top_frame, fg_color="transparent")
-        search_frame.pack(fill="x", padx=15, pady=10)
-
-        self.query_entry = ctk.CTkEntry(
-            search_frame, placeholder_text="Wpisz hasło / temat do analizy RAG...", font=ctk.CTkFont(size=14), height=40
+        self.mode = ctk.CTkOptionMenu(
+            row, values=["fast", "standard", "deep"], width=105
         )
-        self.query_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        self.query_entry.bind("<Return>", lambda event: self.start_analysis())
+        self.mode.set("standard")
+        self.mode.pack(side="left", padx=5)
 
-        self.lang_option = ctk.CTkOptionMenu(search_frame, values=["pl", "en", "de", "fr", "es"], width=70, height=40)
-        self.lang_option.set("pl")
-        self.lang_option.pack(side="left", padx=(0, 10))
-
-        self.search_btn = ctk.CTkButton(
-            search_frame, text="Analizuj (RAG)", font=ctk.CTkFont(size=14, weight="bold"), height=40, command=self.start_analysis
+        self.start_btn = ctk.CTkButton(
+            row, text="🔎 BADAJ", width=125, height=42, command=self.start
         )
-        self.search_btn.pack(side="left")
+        self.start_btn.pack(side="left", padx=(8, 0))
 
-        # Pasek postępu i status
-        self.status_label = ctk.CTkLabel(self, text="Gotowy do działania.", font=ctk.CTkFont(size=12), anchor="w")
-        self.status_label.pack(fill="x", padx=20, pady=(0, 5))
+        keyrow = ctk.CTkFrame(header, fg_color="transparent")
+        keyrow.pack(fill="x", padx=14, pady=(5, 12))
+        ctk.CTkLabel(keyrow, text="Gemini API:").pack(side="left", padx=(0, 6))
+        self.key = ctk.CTkEntry(keyrow, show="*", placeholder_text="GEMINI_API_KEY")
+        self.key.insert(0, os.getenv("GEMINI_API_KEY", ""))
+        self.key.pack(side="left", fill="x", expand=True)
 
-        self.progress_bar = ctk.CTkProgressBar(self, mode="indeterminate")
-        self.progress_bar.pack(fill="x", padx=20, pady=(0, 10))
-        self.progress_bar.stop()
+        self.status = ctk.CTkLabel(self, text="Gotowy.", anchor="w")
+        self.status.pack(fill="x", padx=20, pady=(0, 4))
+        self.progress = ctk.CTkProgressBar(self, mode="indeterminate")
+        self.progress.pack(fill="x", padx=20, pady=(0, 10))
+        self.progress.stop()
 
-        # Karty Wyników (Tabs)
-        self.tabview = ctk.CTkTabview(self)
-        self.tabview.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+        self.tabs = ctk.CTkTabview(self)
+        self.tabs.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+        self.answer_tab = self.tabs.add("Odpowiedź")
+        self.sources_tab = self.tabs.add("Źródła")
+        self.conflicts_tab = self.tabs.add("Weryfikacja")
+        self.searches_tab = self.tabs.add("Zapytania")
 
-        self.tab_synthesis = self.tabview.add("Synteza LLM (Gemini)")
-        self.tab_wiki = self.tabview.add("Kontekst Wikipedia")
-        self.tab_web = self.tabview.add("Kontekst DuckDuckGo")
+        self.answer = ctk.CTkTextbox(self.answer_tab, wrap="word", font=ctk.CTkFont(size=14))
+        self.answer.pack(fill="both", expand=True, padx=8, pady=8)
+        self.sources = ctk.CTkTextbox(self.sources_tab, wrap="word")
+        self.sources.pack(fill="both", expand=True, padx=8, pady=8)
+        self.conflicts = ctk.CTkTextbox(self.conflicts_tab, wrap="word")
+        self.conflicts.pack(fill="both", expand=True, padx=8, pady=8)
+        self.searches = ctk.CTkTextbox(self.searches_tab, wrap="word")
+        self.searches.pack(fill="both", expand=True, padx=8, pady=8)
 
-        # Pola tekstowe w kartach
-        self.txt_synthesis = ctk.CTkTextbox(self.tab_synthesis, font=ctk.CTkFont(size=13), wrap="word")
-        self.txt_synthesis.pack(fill="both", expand=True, padx=5, pady=5)
-
-        self.txt_wiki = ctk.CTkTextbox(self.tab_wiki, font=ctk.CTkFont(size=12), wrap="word")
-        self.txt_wiki.pack(fill="both", expand=True, padx=5, pady=5)
-
-        self.txt_web = ctk.CTkTextbox(self.tab_web, font=ctk.CTkFont(size=12), wrap="word")
-        self.txt_web.pack(fill="both", expand=True, padx=5, pady=5)
+        bottom = ctk.CTkFrame(self, fg_color="transparent")
+        bottom.pack(fill="x", padx=16, pady=(0, 12))
+        ctk.CTkButton(bottom, text="Eksportuj raport Markdown", command=self.export).pack(side="left")
+        ctk.CTkButton(bottom, text="Wyczyść", command=self.clear).pack(side="left", padx=8)
 
     def set_status(self, text: str):
-        self.status_label.configure(text=text)
+        self.after(0, lambda: self.status.configure(text=text))
 
-    def start_analysis(self):
-        query = self.query_entry.get().strip()
+    def start(self):
+        query = self.query.get().strip()
         if not query:
-            self.set_status(" Błąd: Wprowadź temat do wyszukania.")
+            self.set_status("Wpisz pytanie.")
             return
-
-        api_key = self.api_key_entry.get().strip()
+        api_key = self.key.get().strip()
         if not api_key:
-            self.set_status(" Błąd: Brak klucza GEMINI_API_KEY. Uzupełnij pole klucza.")
+            self.set_status("Brak GEMINI_API_KEY.")
             return
 
-        self.search_btn.configure(state="disabled")
-        self.progress_bar.start()
-        self.set_status(" Processing: Pobieranie danych z Wikipedii i DuckDuckGo...")
-
-        # Czyszczenie pól tekstowych
-        self._clear_textbox(self.txt_synthesis)
-        self._clear_textbox(self.txt_wiki)
-        self._clear_textbox(self.txt_web)
-
-        # Uruchomienie w osobnym wątku, aby nie blokować GUI
-        threading.Thread(target=self._run_rag_pipeline, args=(query, self.lang_option.get(), api_key), daemon=True).start()
-
-    def _clear_textbox(self, textbox: ctk.CTkTextbox):
-        textbox.delete("1.0", ctk.END)
-
-    def _write_textbox(self, textbox: ctk.CTkTextbox, text: str):
-        textbox.delete("1.0", ctk.END)
-        textbox.insert("1.0", text)
-
-    def _run_rag_pipeline(self, query: str, lang: str, api_key: str):
-        try:
-            # 1. Wikipedia
-            self.after(0, lambda: self.set_status("[1/3] Pobieranie danych z Wikipedii..."))
-            wiki_ctx = self._get_wiki_context(query, lang)
-            self.after(0, lambda: self._write_textbox(self.txt_wiki, wiki_ctx))
-
-            # 2. DuckDuckGo
-            self.after(0, lambda: self.set_status("[2/3] Pobieranie najnowszych wyników z DuckDuckGo..."))
-            web_ctx = self._get_web_context(query)
-            self.after(0, lambda: self._write_textbox(self.txt_web, web_ctx))
-
-            # 3. Gemini LLM Synthesis
-            self.after(0, lambda: self.set_status("[3/3] Generowanie syntezy przez model Gemini..."))
-            synthesis_result = self._synthesize(query, wiki_ctx, web_ctx, api_key)
-            self.after(0, lambda: self._write_textbox(self.txt_synthesis, synthesis_result))
-
-            self.after(0, lambda: self.set_status(" Gotowe! Odpowiedź została wygenerowana."))
-        except Exception as e:
-            err_msg = f" Wystąpił błąd podczas analizy: {str(e)}"
-            self.after(0, lambda: self.set_status(err_msg))
-            self.after(0, lambda: self._write_textbox(self.txt_synthesis, err_msg))
-        finally:
-            self.after(0, self._finish_processing)
-
-    def _finish_processing(self):
-        self.progress_bar.stop()
-        self.search_btn.configure(state="normal")
-
-    def _get_wiki_context(self, query: str, lang: str) -> str:
-        user_agent = "ResearchAgentGUI/1.0 (contact@example.com)"
-        wiki = wikipediaapi.Wikipedia(user_agent=user_agent, language=lang)
-        page = wiki.page(query)
-
-        if not page.exists():
-            return f"[WIKIPEDIA]: Brak strony dla zapytania '{query}' w języku '{lang}'."
-
-        title_lower = page.title.lower()
-        summary_lower = page.summary.lower()
-        is_disambiguation = "ujednoznacznienie" in title_lower or "disambiguation" in title_lower or "strona ujednoznaczniająca" in summary_lower
-
-        if not is_disambiguation:
-            for cat in page.categories.keys():
-                if "ujednoznacznienie" in cat.lower() or "disambiguation" in cat.lower():
-                    is_disambiguation = True
-                    break
-
-        if is_disambiguation:
-            links = list(page.links.keys())[:12]
-            links_str = ", ".join(links) if links else "brak linków"
-            return f"[WIKIPEDIA]: Strona ujednoznaczniająca dla '{query}'. Możliwe tematy: {links_str}."
-
-        snippet = page.text[:4000] if page.text else page.summary
-        return f"TYTUŁ: {page.title}\n\nPODSUMOWANIE:\n{page.summary}\n\nFRAGMENT TREŚCI:\n{snippet}"
-
-    def _get_web_context(self, query: str) -> str:
-        try:
-            results = []
-            with DDGS() as ddgs:
-                ddg_gen = ddgs.text(query, max_results=4)
-                if ddg_gen:
-                    results = list(ddg_gen)
-
-            if not results:
-                return f"[WEB SEARCH]: Brak wyników dla '{query}'."
-
-            out = []
-            for i, r in enumerate(results, 1):
-                out.append(f"{i}. {r.get('title', '')}\n   URL: {r.get('href', '')}\n   Opis: {r.get('body', '')}")
-            return "\n\n".join(out)
-        except Exception as e:
-            return f"[WEB SEARCH ERROR]: {str(e)}"
-
-    def _synthesize(self, query: str, wiki_ctx: str, web_ctx: str, api_key: str) -> str:
-        client = genai.Client(api_key=api_key)
-
-        sys_instruction = (
-            "Jesteś obiektywnym, profesjonalnym analitykiem RAG.\n"
-            "Twoim zadaniem jest synteza odpowiedzi wyłącznie na podstawie wstrzykniętych danych z Wikipedii i Wyszukiwarki Internetowej.\n"
-            "BEZWZGLĘDNY ZAKAZ KONFABULACJI i wymyślania faktów spoza tekstu kontekstu.\n"
-            "Formatuj odpowiedź przejrzyście w Markdown z nagłówkami i punktami."
+        self.start_btn.configure(state="disabled")
+        self.progress.start()
+        self.clear()
+        settings = Settings.from_env()
+        settings = Settings(
+            gemini_api_key=api_key,
+            gemini_model=settings.gemini_model,
+            language=self.lang.get(),
+            user_agent=settings.user_agent,
+            max_web_results=settings.max_web_results,
+            max_sources=settings.max_sources,
+            chunk_size=settings.chunk_size,
+            chunk_overlap=settings.chunk_overlap,
+            timeout_seconds=settings.timeout_seconds,
         )
+        mode = self.mode.get()
 
-        prompt = (
-            f"ZAPYTANIE: {query}\n\n"
-            f"=== KONTEKST WIKIPEDIA ===\n{wiki_ctx}\n\n"
-            f"=== KONTEKST DUCKDUCKGO ===\n{web_ctx}\n\n"
-            "SYNTEZA ODPOWIEDZI:"
+        def worker():
+            try:
+                result = ResearchPipeline(settings).run(
+                    query, mode=mode, progress=self.set_status
+                )
+                self.result = result
+                self.history.save(result)
+                self.after(0, self.show_result)
+            except Exception as exc:
+                self.set_status(f"Błąd: {exc}")
+                self.after(0, lambda: messagebox.showerror("Research AI", str(exc)))
+            finally:
+                self.after(0, self.finish)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def show_result(self):
+        self.answer.insert("1.0", self.result.answer)
+        source_text = "\n\n".join(
+            f"[{s.id}] {s.title}\n{ s.url }\nOcena źródła: {s.score:.1f}\n"
+            f"Typ: {s.kind}\n"
+            for s in self.result.sources
         )
+        self.sources.insert("1.0", source_text or "Brak źródeł.")
+        self.conflicts.insert("1.0", self.result.conflicts or "Tryb standard/fast: analiza sprzeczności nie była uruchamiana.")
+        self.searches.insert("1.0", "\n".join(self.result.subqueries))
 
-        resp = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=sys_instruction,
-                temperature=0.1,
-            ),
+    def finish(self):
+        self.progress.stop()
+        self.start_btn.configure(state="normal")
+
+    def clear(self):
+        for box in (self.answer, self.sources, self.conflicts, self.searches):
+            box.delete("1.0", tk.END)
+
+    def export(self):
+        if not self.result:
+            messagebox.showinfo("Eksport", "Najpierw wykonaj badanie.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Zapisz raport",
+            defaultextension=".md",
+            filetypes=[("Markdown", "*.md"), ("Wszystkie pliki", "*.*")],
         )
-
-        return resp.text if resp.text else "Brak odpowiedzi z modelu."
+        if path:
+            export_markdown(self.result, path)
+            messagebox.showinfo("Eksport", f"Zapisano raport:\n{path}")
 
 
 if __name__ == "__main__":
-    app = RAGApp()
-    app.mainloop()
+    ResearchApp().mainloop()
